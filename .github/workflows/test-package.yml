@@ -13,34 +13,77 @@ jobs:
       LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
       KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
       MAX_TIME_SECONDS: 300 # 5 minutes in seconds
+      CLUSTER_LABEL: "test-cluster-${{ github.run_id }}"
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.3.0
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-
-      - name: Save Kubeconfig
+      - name: Install Linode CLI
         run: |
-          terraform output -raw kubeconfig > $KUBECONFIG
-        shell: bash
+          pip install linode-cli
+
+      - name: Configure Linode CLI
+        run: |
+          linode-cli configure --token $LINODE_API_TOKEN --label "github-actions" --json
+        env:
+          LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
+
+      - name: Create Kubernetes Cluster
+        id: create_cluster
+        run: |
+          cluster_create_output=$(linode-cli lke cluster-create \
+            --label $CLUSTER_LABEL \
+            --region us-east \
+            --k8s_version 1.28 \
+            --node_pools.type g6-standard-4 \
+            --node_pools.count 3 \
+            --tags github-actions \
+            --format id \
+            --text)
+          echo "Cluster creation output: $cluster_create_output"
+          export CLUSTER_ID=$(echo $cluster_create_output | awk '{print $2}')
+          echo "Cluster ID: $CLUSTER_ID"
+          echo "::set-output name=CLUSTER_ID::$CLUSTER_ID"
+        env:
+          CLUSTER_LABEL: ${{ env.CLUSTER_LABEL }}
+
+      - name: Wait for Cluster to be Ready
+        run: |
+          CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
+          echo "Waiting for cluster ID $CLUSTER_ID to be ready..."
+          for i in {1..30}; do
+            status=$(linode-cli lke cluster-view $CLUSTER_ID --format status --text | tail -n1)
+            echo "Cluster status: $status"
+            if [ "$status" == "ready" ]; then
+              echo "Cluster is ready."
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Cluster did not become ready in time."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Retrieve Kubeconfig
+        run: |
+          CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
+          linode-cli lke kubeconfig-view $CLUSTER_ID > $KUBECONFIG
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
 
       - name: Set up kubectl
         uses: azure/setup-kubectl@v3
         with:
           version: 'latest'
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
 
       - name: Verify kubectl Configuration
         run: kubectl get nodes
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
 
       - name: Install Helm
         uses: azure/setup-helm@v3
@@ -55,8 +98,12 @@ jobs:
 
       - name: Install OpenComply
         run: |
-          helm install opencomply opencomply/opencomply --create-namespace --namespace opencomply --timeout 10m
-        shell: bash
+          helm install opencomply opencomply/opencomply \
+            --create-namespace \
+            --namespace opencomply \
+            --timeout 10m
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
 
       - name: Wait for Pods to be Ready and Jobs to Complete
         id: wait_for_ready
@@ -96,7 +143,8 @@ jobs:
 
           total_time=$(( current_time - start_time ))
           echo "::set-output name=total_time::$total_time"
-        shell: bash
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
 
       - name: Output Total Time
         run: |
@@ -106,6 +154,9 @@ jobs:
             exit 1
           fi
 
-      - name: Terraform Destroy
+      - name: Delete Kubernetes Cluster
         if: always()
-        run: terraform destroy -auto-approve
+        run: |
+          CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
+          echo "Deleting cluster ID $CLUSTER_ID..."
+          linode-cli lke cluster-delete $CLUSTER_ID
