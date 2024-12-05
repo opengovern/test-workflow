@@ -53,8 +53,8 @@ jobs:
         run: |
           CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
           echo "Waiting for cluster ID $CLUSTER_ID to have all API endpoints available..."
-          MAX_RETRIES=30
-          SLEEP_INTERVAL=10
+          MAX_RETRIES=5
+          SLEEP_INTERVAL=60
           SUCCESS=false
 
           for ((i=1;i<=MAX_RETRIES;i++)); do
@@ -94,8 +94,8 @@ jobs:
         run: |
           CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
           echo "Attempting to retrieve kubeconfig for cluster ID $CLUSTER_ID..."
-          MAX_RETRIES=30
-          SLEEP_INTERVAL=10
+          MAX_RETRIES=5
+          SLEEP_INTERVAL=60
           SUCCESS=false
 
           for ((i=1;i<=MAX_RETRIES;i++)); do
@@ -212,13 +212,13 @@ jobs:
         run: |
           # List all PersistentVolumeClaims in the cluster and extract associated PersistentVolumes
           pvcs=$(kubectl get pvc --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}:{.spec.volumeName}{"\n"}{end}')
-          
+
           # Extract unique PersistentVolumes
           pvs=$(echo "$pvcs" | awk -F':' '{print $2}' | sort | uniq)
-          
+
           echo "PVCs and their PersistentVolumes:"
           echo "$pvcs"
-          
+
           # Store PV IDs for deletion
           echo "PVS=$pvs" >> $GITHUB_OUTPUT
         env:
@@ -238,8 +238,8 @@ jobs:
         run: |
           CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
           echo "Waiting for cluster ID $CLUSTER_ID to be deleted..."
-          MAX_RETRIES=30
-          SLEEP_INTERVAL=10
+          MAX_RETRIES=5
+          SLEEP_INTERVAL=60
           SUCCESS=false
 
           for ((i=1;i<=MAX_RETRIES;i++)); do
