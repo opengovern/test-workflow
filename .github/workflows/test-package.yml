@@ -23,7 +23,7 @@ jobs:
         run: |
           pip install linode-cli
 
-      # Remove the Configure Linode CLI step
+      # Removed the Configure Linode CLI step
       # Linode CLI will use the LINODE_CLI_TOKEN environment variable
 
       - name: Create Kubernetes Cluster
@@ -31,17 +31,18 @@ jobs:
         run: |
           cluster_create_output=$(linode-cli lke cluster-create \
             --label $CLUSTER_LABEL \
-            --region us-east \
-            --k8s_version 1.28 \
-            --node_pools.type g6-standard-4 \
+            --region us-central \
+            --k8s_version 1.31 \
+            --control_plane.high_availability false \
+            --node_pools.type g6-standard-8 \
             --node_pools.count 3 \
-            --tags github-actions \
+            --tags ecomm \
             --format id \
             --text)
           echo "Cluster creation output: $cluster_create_output"
-          export CLUSTER_ID=$(echo $cluster_create_output | awk '{print $2}')
+          CLUSTER_ID=$(echo $cluster_create_output | awk '{print $2}')
           echo "Cluster ID: $CLUSTER_ID"
-          echo "::set-output name=CLUSTER_ID::$CLUSTER_ID"
+          echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_OUTPUT
         env:
           CLUSTER_LABEL: ${{ env.CLUSTER_LABEL }}
           LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
@@ -143,7 +144,7 @@ jobs:
           done
 
           total_time=$(( current_time - start_time ))
-          echo "::set-output name=total_time::$total_time"
+          echo "total_time=$total_time" >> $GITHUB_OUTPUT
         env:
           KUBECONFIG: ${{ env.KUBECONFIG }}
 
@@ -156,7 +157,7 @@ jobs:
           fi
 
       - name: Delete Kubernetes Cluster
-        if: always()
+        if: steps.create_cluster.outcome == 'success'
         run: |
           CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
           echo "Deleting cluster ID $CLUSTER_ID..."
