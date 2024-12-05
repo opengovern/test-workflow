@@ -14,6 +14,7 @@ jobs:
       KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
       MAX_TIME_SECONDS: 300 # 5 minutes in seconds
       CLUSTER_LABEL: "test-cluster-${{ github.run_id }}"
+      VOLUME_TAG: "ecomm-${{ github.run_id }}" # Unique tag to identify volumes
 
     steps:
       - name: Checkout Repository
@@ -23,7 +24,6 @@ jobs:
         run: |
           pip install linode-cli
 
-      # Removed the Configure Linode CLI step
       # Linode CLI will use the LINODE_CLI_TOKEN environment variable
 
       - name: Create Kubernetes Cluster
@@ -34,9 +34,10 @@ jobs:
             --region us-central \
             --k8s_version 1.31 \
             --control_plane.high_availability false \
-            --node_pools.type g6-standard-8 \
+            --node_pools.type g6-dedicated-4 \
             --node_pools.count 3 \
-            --tags ecomm \
+            --node_pools.autoscaler.enabled false \
+            --tags $VOLUME_TAG \
             --format id \
             --text)
           echo "Cluster creation output: $cluster_create_output"
@@ -45,6 +46,7 @@ jobs:
           echo "CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_OUTPUT
         env:
           CLUSTER_LABEL: ${{ env.CLUSTER_LABEL }}
+          VOLUME_TAG: ${{ env.VOLUME_TAG }}
           LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
 
       - name: Wait for Cluster to be Ready
@@ -156,6 +158,23 @@ jobs:
             exit 1
           fi
 
+      - name: Identify PVC Volumes
+        id: identify_pvcs
+        run: |
+          # List all PersistentVolumeClaims in the cluster and extract associated PersistentVolumes
+          pvcs=$(kubectl get pvc --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}:{.spec.volumeName}{"\n"}{end}')
+          
+          # Extract unique PersistentVolumes
+          pvs=$(echo "$pvcs" | awk -F':' '{print $2}' | sort | uniq)
+          
+          echo "PVCS and their PersistentVolumes:"
+          echo "$pvcs"
+          
+          # Store PV IDs for deletion
+          echo "PVS=$pvs" >> $GITHUB_OUTPUT
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+
       - name: Delete Kubernetes Cluster
         if: steps.create_cluster.outcome == 'success'
         run: |
@@ -164,3 +183,60 @@ jobs:
           linode-cli lke cluster-delete $CLUSTER_ID
         env:
           LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
+
+      - name: Wait for Cluster Deletion
+        if: steps.create_cluster.outcome == 'success'
+        run: |
+          CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
+          echo "Waiting for cluster ID $CLUSTER_ID to be deleted..."
+          for i in {1..30}; do
+            status=$(linode-cli lke cluster-view $CLUSTER_ID --format status --text 2>/dev/null || echo "deleted")
+            echo "Cluster status: $status"
+            if [ "$status" == "deleted" ]; then
+              echo "Cluster has been deleted."
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Cluster was not deleted in time."
+              exit 1
+            fi
+            sleep 10
+          done
+        env:
+          LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
+
+      - name: Delete PVC Volumes
+        if: steps.create_cluster.outcome == 'success'
+        run: |
+          pvs=${{ steps.identify_pvcs.outputs.PVS }}
+          if [ -z "$pvs" ]; then
+            echo "No PersistentVolumes to delete."
+            exit 0
+          fi
+
+          echo "Deleting PersistentVolumes:"
+          for pv in $pvs; do
+            echo "Deleting PersistentVolume: $pv"
+            kubectl delete pv $pv
+          done
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+
+      - name: Delete Linode Volumes
+        if: steps.create_cluster.outcome == 'success' && steps.identify_pvcs.outputs.PVS != ''
+        run: |
+          # Assuming volumes are tagged with $VOLUME_TAG
+          volumes=$(linode-cli volume list --tag $VOLUME_TAG --format id --text)
+          if [ -z "$volumes" ]; then
+            echo "No Linode volumes to delete."
+            exit 0
+          fi
+
+          echo "Deleting Linode Volumes:"
+          for volume_id in $volumes; do
+            echo "Deleting volume ID: $volume_id"
+            linode-cli volume delete $volume_id --yes
+          done
+        env:
+          LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
+          VOLUME_TAG: ${{ env.VOLUME_TAG }}
