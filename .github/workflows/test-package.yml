@@ -20,9 +20,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Install Linode CLI
+      - name: Install Linode CLI and jq
         run: |
           pip install linode-cli
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       # Linode CLI will use the LINODE_CLI_TOKEN environment variable
 
@@ -59,7 +61,7 @@ jobs:
         env:
           LINODE_CLI_TOKEN: ${{ env.LINODE_CLI_TOKEN }}
 
-      - name: Retrieve Kubeconfig with Retry
+      - name: Retrieve and Decode Kubeconfig with Retry
         id: retrieve_kubeconfig
         run: |
           CLUSTER_ID=${{ steps.create_cluster.outputs.CLUSTER_ID }}
@@ -70,16 +72,24 @@ jobs:
 
           for ((i=1;i<=MAX_RETRIES;i++)); do
             echo "Attempt $i: Retrieving kubeconfig..."
-            linode-cli lke kubeconfig-view $CLUSTER_ID > $KUBECONFIG && {
-              echo "Kubeconfig retrieved successfully."
-              SUCCESS=true
-              break
+            # Retrieve the kubeconfig in JSON format and decode the Base64 string
+            linode-cli --json lke kubeconfig-view $CLUSTER_ID | jq -r '.[].kubeconfig | @base64d' > $KUBECONFIG && {
+              echo "Kubeconfig retrieved and decoded successfully."
+              # Validate kubeconfig format
+              if grep -q "apiVersion" "$KUBECONFIG" && grep -q "kind" "$KUBECONFIG"; then
+                echo "Kubeconfig validation succeeded."
+                SUCCESS=true
+                break
+              else
+                echo "Kubeconfig validation failed. The file is malformed."
+                rm -f $KUBECONFIG
+              fi
             } || {
               echo "Kubeconfig not ready yet."
             }
 
             if [ $i -eq $MAX_RETRIES ]; then
-              echo "Failed to retrieve kubeconfig within expected time."
+              echo "Failed to retrieve a valid kubeconfig within expected time."
               exit 1
             fi
 
@@ -88,7 +98,7 @@ jobs:
           done
 
           if [ "$SUCCESS" = true ]; then
-            echo "Kubeconfig retrieval succeeded."
+            echo "Kubeconfig retrieval and validation succeeded."
           fi
 
           echo "SUCCESS=$SUCCESS" >> $GITHUB_OUTPUT
